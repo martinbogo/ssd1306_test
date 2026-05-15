@@ -574,7 +574,7 @@ static void render_plant_oled(App* app) {
                 for(int16_t x = 0; x < 128; x++)
                     ssd1306_pixel(d, x, y, false);
         }
-        ssd1306_string(d, 2, 4, "R.I.P. Desk Plant");
+        ssd1306_string(d, 2, 4, "R.I.P. Spiteful Ficus");
 
         const char* insult = app->plant_is_monty_insult ?
                                  monty_insults[app->plant_insult_idx % NUM_MONTY_INSULTS] :
@@ -860,7 +860,7 @@ static void draw_callback(Canvas* canvas, void* ctx) {
     case ScenePlant:
         canvas_clear(canvas);
         canvas_set_font(canvas, FontPrimary);
-        canvas_draw_str(canvas, 2, 12, "Desk Plant");
+        canvas_draw_str(canvas, 2, 12, "Spiteful Ficus");
         canvas_draw_line(canvas, 0, 15, 128, 15);
         canvas_set_font(canvas, FontSecondary);
         if(app->plant_is_dead) {
