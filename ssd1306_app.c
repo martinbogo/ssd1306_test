@@ -5,6 +5,7 @@
 #include <furi_hal.h>
 #include <storage/storage.h>
 #include <stdlib.h>
+#include <math.h>
 
 // Display variant: yellow-bar split height (0 = full monochrome)
 #define YELLOW_BAR_16   16
@@ -61,6 +62,10 @@ typedef struct {
     uint32_t plant_last_press_tick;
     uint8_t plant_stress;
     uint8_t plant_need; // 0: water, 1: sun, 2: shade, 3: rotate L, 4: rotate R
+    uint8_t plant_need_message_idx;
+    uint32_t plant_need_change_time;
+    uint32_t plant_last_update_time;
+    uint32_t plant_last_app_close_time;
     uint32_t plant_ticks;
 
     // death mechanics
@@ -82,6 +87,18 @@ typedef struct {
     uint32_t dead_until;
     uint8_t lockout_attempts;
     uint32_t magic;
+    
+    // Growth persistence
+    uint32_t growth;
+    int32_t water;
+    int32_t sun;
+    int8_t rotation;
+    uint8_t stress;
+    uint8_t need;
+    
+    // Timestamps for real-time updates
+    uint32_t last_update_time;
+    uint32_t need_change_time;
 } PlantSaveState;
 
 static void plant_crypt_data(uint8_t* data, size_t size) {
@@ -104,6 +121,19 @@ static void save_plant_state(App* app) {
         state.is_dead = app->plant_is_dead;
         state.dead_until = app->plant_dead_until;
         state.lockout_attempts = app->plant_lockout_attempts;
+        
+        // Save growth state
+        state.growth = app->plant_growth;
+        state.water = app->plant_water;
+        state.sun = app->plant_sun;
+        state.rotation = app->plant_rotation;
+        state.stress = app->plant_stress;
+        state.need = app->plant_need;
+        
+        // Timestamp for real-time decay
+        state.last_update_time = furi_hal_rtc_get_timestamp();
+        state.need_change_time = app->plant_need_change_time;
+        
         state.magic = PLANT_SAVE_MAGIC;
         
         plant_crypt_data((uint8_t*)&state, sizeof(state));
@@ -125,6 +155,44 @@ static void load_plant_state(App* app) {
                 app->plant_is_dead = state.is_dead;
                 app->plant_dead_until = state.dead_until;
                 app->plant_lockout_attempts = state.lockout_attempts;
+                
+                // Load growth state
+                app->plant_growth = state.growth;
+                app->plant_water = state.water;
+                app->plant_sun = state.sun;
+                app->plant_rotation = state.rotation;
+                app->plant_stress = state.stress;
+                app->plant_need = state.need;
+                
+                app->plant_last_update_time = state.last_update_time;
+                app->plant_need_change_time = state.need_change_time;
+                
+                // Calculate real-time updates while app was closed
+                uint32_t now = furi_hal_rtc_get_timestamp();
+                if(app->plant_last_update_time > 0 && now > app->plant_last_update_time) {
+                    uint32_t elapsed_seconds = now - app->plant_last_update_time;
+                    uint32_t ticks_elapsed = elapsed_seconds / 5;  // simulating 5-tick updates
+                    
+                    if(!app->plant_is_dead) {
+                        // Slow decay while closed
+                        app->plant_water -= (ticks_elapsed / 2);  // -1 water per 10 sec
+                        app->plant_sun -= (ticks_elapsed / 4);    // -1 sun per 20 sec
+                        
+                        // Withering on neglect
+                        if(app->plant_stress > 20 && app->plant_growth > 0) {
+                            app->plant_growth -= (ticks_elapsed / 100);  // shrink slowly
+                        }
+                        
+                        // Death from extreme neglect
+                        if(app->plant_water < -20 || app->plant_water > 120 || app->plant_stress > 40) {
+                            app->plant_is_dead = true;
+                            app->plant_dead_until = now + (60 + (rand() % 241));
+                            app->plant_growth = 0;
+                        }
+                    }
+                }
+                
+                app->plant_last_update_time = 0;  // will be set on close
             }
         }
     }
@@ -224,6 +292,101 @@ static const char* monty_insults[] = {
     "Bring us a shrubbery!"
 };
 #define NUM_MONTY_INSULTS 42
+
+// -- Plant need messages (16 per need) --
+static const char* plant_need_messages[] = {
+    // Water (0)
+    "I'm parched, duh.",
+    "Liquid please, NOW.",
+    "Dying of thirst here.",
+    "Water me, slacker.",
+    "My roots are crispy.",
+    "Cotyledons curling up.",
+    "Need a drink badly.",
+    "Transpiration killing me.",
+    "So. Very. Dry.",
+    "Please hydrate me.",
+    "Dust in my veins.",
+    "Cellular collapse soon.",
+    "Desperate for moisture.",
+    "This is pathetic.",
+    "Even cacti pity me.",
+    "Water or I'm gone.",
+    
+    // Sun (1)
+    "I need more light.",
+    "So. Very. Dark.",
+    "Where is the sun?",
+    "Photosynthesis failing.",
+    "Dim and depressed.",
+    "Chlorophyll starving.",
+    "Light, you monster.",
+    "SAD is real for plants.",
+    "Etiolating over here.",
+    "Can't see anything.",
+    "Pale and droopy.",
+    "Find me sunlight.",
+    "This dungeon stinks.",
+    "Literally dying in dark.",
+    "Even mushrooms laugh.",
+    "Windows exist, use them.",
+    
+    // Shade (2)
+    "This light burns, ow.",
+    "My leaves are bleached.",
+    "Turn down the heat.",
+    "Photosynthesis overdose.",
+    "Too much sun, jerk.",
+    "Scorching my stems.",
+    "I'm literally burning.",
+    "Shade would be nice.",
+    "Heat-fried leaf tips.",
+    "This is brutal.",
+    "Sunburn, but worse.",
+    "Chlorophyll toast.",
+    "Wilt if you don't help.",
+    "Desert plant I'm not.",
+    "Shade now, please.",
+    "This is cruel.",
+    
+    // Rotate Left (3)
+    "Right side numb, move me.",
+    "Phototropism failing here.",
+    "Turn me left, lazy.",
+    "Left my light, fix it.",
+    "Sun is over that way.",
+    "Stuck in the dark side.",
+    "This angle is wrong.",
+    "Lean me toward light.",
+    "My right limb is gone.",
+    "Asymmetrical and upset.",
+    "Left side needs sun.",
+    "Rotate me, I beg.",
+    "Uneven growth sucks.",
+    "Lopsided and cranky.",
+    "Please spin me left.",
+    "Right side abandoned.",
+    
+    // Rotate Right (4)
+    "Left side numb, move me.",
+    "Phototropism failing here.",
+    "Turn me right, lazy.",
+    "Left my light, fix it.",
+    "Sun is that direction.",
+    "Stuck in the dark side.",
+    "This angle is wrong.",
+    "Lean me toward light.",
+    "My left limb is gone.",
+    "Asymmetrical and upset.",
+    "Right side needs sun.",
+    "Rotate me, I beg.",
+    "Uneven growth sucks.",
+    "Lopsided and cranky.",
+    "Please spin me right.",
+    "Left side abandoned.",
+};
+#define NUM_NEED_MESSAGES 16
+#define NUM_NEED_TYPES 5
 
 static const char* weekday_names[] = {"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"};
 
@@ -563,6 +726,72 @@ static void render_clock_oled(App* app) {
     app->last_second = dt.second;
 }
 
+// Helper: draw a leaf at (cx, cy) with size and angle
+static void draw_leaf(SSD1306* d, int cx, int cy, int size, int angle) {
+    (void)angle;
+    // Simple leaf: two curved lines forming an ellipse
+    
+    
+    
+    
+    // Draw leaf outline
+    for(int i = -size; i <= size; i++) {
+        int y_offset = (i * i) / (size * size + 1);
+        int x_left = cx - (size - y_offset / 2);
+        int x_right = cx + (size - y_offset / 2);
+        
+        int actual_y = cy + i;
+        if(actual_y >= 17 && actual_y < 64) {
+            ssd1306_pixel(d, x_left, actual_y, true);
+            ssd1306_pixel(d, x_right, actual_y, true);
+        }
+    }
+}
+
+// Helper: draw a flower (circle with petals)
+static void draw_flower(SSD1306* d, int cx, int cy, int petal_size) {
+    if(cy < 17 || cy >= 64) return;
+    
+    // Center circle
+    for(int x = -2; x <= 2; x++) {
+        for(int y = -2; y <= 2; y++) {
+            int px = cx + x;
+            int py = cy + y;
+            if(px >= 0 && px < 128 && py >= 17 && py < 64) {
+                if(x*x + y*y <= 4) ssd1306_pixel(d, px, py, true);
+            }
+        }
+    }
+    
+    // Petals (4 directions)
+    for(int petal = 0; petal < 4; petal++) {
+        int angle = petal * 90;
+        float rad = (angle * 3.14159f) / 180.0f;
+        int px = cx + (int)(petal_size * 1.5f * cosf((float)rad));
+        int py = cy - (int)(petal_size * 1.5f * sinf((float)rad));
+        
+        if(px >= 0 && px < 128 && py >= 17 && py < 64) {
+            ssd1306_circle(d, px, py, petal_size);
+        }
+    }
+}
+
+// Helper: draw a petal cluster
+static void draw_petals(SSD1306* d, int cx, int cy, int num_petals) {
+    if(cy < 17 || cy >= 64) return;
+    
+    for(int i = 0; i < num_petals; i++) {
+        float angle = (i * 360.0f) / num_petals * 3.14159f / 180.0f;
+        int px = cx + (int)(5 * cosf((float)angle));
+        int py = cy - (int)(5 * sinf((float)angle));
+        
+        if(px >= 0 && px < 128 && py >= 17 && py < 64) {
+            ssd1306_pixel(d, px, py, true);
+            if(i % 2 == 0 && py - 1 >= 17) ssd1306_pixel(d, px, py - 1, true);
+        }
+    }
+}
+
 static void render_plant_oled(App* app) {
     SSD1306* d = &app->oled;
     ssd1306_clear(d);
@@ -604,46 +833,17 @@ static void render_plant_oled(App* app) {
         return;
     }
 
-    const char* hint = "I am a plant.";
-    if(app->plant_stress > 15) {
-        hint = "Stop button mashing.";
-    } else if(app->plant_stress > 5) {
-        hint = "Please don't rush me.";
-    } else if(app->plant_water <= 0) {
-        hint = "So parched...";
-    } else if(app->plant_water > 100) {
-        hint = "Drowning here.";
-    } else {
-        switch(app->plant_need) {
-        case 0:
-            hint = "...dusty throat...";
-            break;
-        case 1:
-            hint = "Squinting. Need light.";
-            break;
-        case 2:
-            hint = "Ouch, my retinas.";
-            break;
-        case 3:
-            hint = "Right side cold.";
-            break;
-        case 4:
-            hint = "Left side numb.";
-            break;
-        default:
-            hint = "...";
-            break;
-        }
-    }
+    // Get current message for the need
+    const char* message = plant_need_messages[app->plant_need * NUM_NEED_MESSAGES + app->plant_need_message_idx];
 
-    // Draw hint text exclusively in the upper 16px (yellow bar zone)
+    // Draw hint text in the upper 16px (yellow bar zone) or top area
     if(app->yellow_bar_height > 0) {
         ssd1306_fill_rect(d, 0, 0, 128, 16);
         for(int16_t y = 4; y < 12; y++)
             for(int16_t x = 0; x < 128; x++)
                 ssd1306_pixel(d, x, y, false);
     }
-    ssd1306_string(d, 2, 4, hint);
+    ssd1306_string(d, 2, 4, message);
 
     // ground
     ssd1306_line(d, 0, 60, 127, 60);
@@ -654,18 +854,18 @@ static void render_plant_oled(App* app) {
     ssd1306_line(d, px + 4, 60, px + 8, 45);
     ssd1306_line(d, px - 8, 45, px + 8, 45);
 
-    // stalk logic: bounds y >= 17 to keep out of top area
+    // stalk with procedural leaves and flowers
     uint32_t segments = app->plant_growth / 5;
     if(segments > 200) segments = 200;
 
     int cx = px;
     int cy = 45;
-    uint32_t seed = 0x12345678; // fixed seed, deterministic shape
+    uint32_t seed = 0x12345678;  // deterministic seed for consistent shape
 
     for(uint32_t i = 0; i < segments; i++) {
         seed = seed * 1664525 + 1013904223;
-        int dx = (seed >> 24) % 9 - 4; // -4 to +4 sideways spread
-        int dy = (seed >> 20) % 4 + 1; // 1 to 4 upwards
+        int dx = (seed >> 24) % 9 - 4;   // -4 to +4 sideways
+        int dy = (seed >> 20) % 4 + 1;   // 1 to 4 upwards
 
         int nx = cx + dx;
         int ny = cy - dy;
@@ -673,14 +873,36 @@ static void render_plant_oled(App* app) {
         // Bounds checking
         if(nx < 0) nx = 0;
         if(nx > 127) nx = 127;
-        if(ny < 17) ny = 17; // Don't enter upper 16px
+        if(ny < 17) ny = 17;
 
         ssd1306_line(d, cx, cy, nx, ny);
+
+        // Procedurally add leaves every 10-15 segments
+        if((i + 1) % 12 == 0 && i > 5) {
+            int leaf_size = 2 + (i / 30);
+            if(leaf_size > 5) leaf_size = 5;
+            draw_leaf(d, nx - 8, ny, leaf_size, (seed >> 12) & 1);
+            draw_leaf(d, nx + 8, ny, leaf_size, (seed >> 13) & 1);
+        }
+
+        // Add flowers near the top
+        if(segments > 50 && i > segments - 15 && (i + 1) % 5 == 0) {
+            draw_flower(d, nx - 6, ny - 3, 2);
+        }
+
+        // Add petal clusters
+        if(segments > 80 && i > segments - 30 && (i + 1) % 8 == 0) {
+            draw_petals(d, nx, ny - 2, 5 + (seed >> 16) % 3);
+        }
+
         cx = nx;
         cy = ny;
-
-        if(cy == 17) break; // reached top bounds
     }
+
+    // Status indicators at bottom right
+    char status[32];
+    snprintf(status, sizeof(status), "W:%ld S:%ld St:%d", app->plant_water, app->plant_sun, app->plant_stress);
+    ssd1306_string(d, 2, 50, status);
 
     ssd1306_flush(d);
 }
@@ -889,6 +1111,8 @@ static void handle_plant(App* app, InputEvent* ev) {
     if(ev->key == InputKeyBack) {
         app->scene = SceneMainMenu;
         app->cursor = 6;
+        app->plant_last_update_time = furi_hal_rtc_get_timestamp();
+        save_plant_state(app);
         return;
     }
 
@@ -905,11 +1129,16 @@ static void handle_plant(App* app, InputEvent* ev) {
     app->plant_last_press_tick = now;
     if(app->plant_stress > 0) app->plant_stress--;
 
+    // Rotate message index
+    app->plant_need_message_idx = (app->plant_need_message_idx + 1) % NUM_NEED_MESSAGES;
+
     switch(ev->key) {
     case InputKeyOk: // water
         if(app->plant_need == 0) {
             app->plant_water += 20;
             app->plant_need = rand() % 5;
+            app->plant_need_message_idx = 0;
+            app->plant_need_change_time = furi_hal_rtc_get_timestamp();
         } else {
             app->plant_water += 30;
             app->plant_stress += 5;
@@ -919,6 +1148,8 @@ static void handle_plant(App* app, InputEvent* ev) {
         if(app->plant_need == 1) {
             app->plant_sun += 20;
             app->plant_need = rand() % 5;
+            app->plant_need_message_idx = 0;
+            app->plant_need_change_time = furi_hal_rtc_get_timestamp();
         } else {
             app->plant_stress += 5;
         }
@@ -927,6 +1158,8 @@ static void handle_plant(App* app, InputEvent* ev) {
         if(app->plant_need == 2) {
             app->plant_sun -= 20;
             app->plant_need = rand() % 5;
+            app->plant_need_message_idx = 0;
+            app->plant_need_change_time = furi_hal_rtc_get_timestamp();
         } else {
             app->plant_stress += 5;
         }
@@ -935,6 +1168,8 @@ static void handle_plant(App* app, InputEvent* ev) {
         app->plant_rotation -= 2;
         if(app->plant_need == 3) {
             app->plant_need = rand() % 5;
+            app->plant_need_message_idx = 0;
+            app->plant_need_change_time = furi_hal_rtc_get_timestamp();
         } else {
             app->plant_stress += 2;
         }
@@ -943,6 +1178,8 @@ static void handle_plant(App* app, InputEvent* ev) {
         app->plant_rotation += 2;
         if(app->plant_need == 4) {
             app->plant_need = rand() % 5;
+            app->plant_need_message_idx = 0;
+            app->plant_need_change_time = furi_hal_rtc_get_timestamp();
         } else {
             app->plant_stress += 2;
         }
@@ -1299,6 +1536,21 @@ int32_t ssd1306_app_main(void* p) {
 
             if(!app->plant_is_dead) {
                 app->plant_ticks++;
+                
+                // Randomized 2-21 minute need timer
+                uint32_t now_epoch = furi_hal_rtc_get_timestamp();
+                uint32_t need_timer_seconds = (app->plant_need_change_time > 0) ? 
+                    (now_epoch - app->plant_need_change_time) : 0;
+                
+                // 120 to 1260 seconds (2 to 21 minutes)
+                uint32_t need_threshold = 120 + (app->plant_need * 53 + (rand() % 200));
+                
+                if(need_timer_seconds > need_threshold) {
+                    app->plant_need = rand() % 5;
+                    app->plant_need_message_idx = 0;
+                    app->plant_need_change_time = now_epoch;
+                }
+
                 if(app->plant_ticks % 5 == 0) {
                     // slow adjustments
                     if(app->plant_water > -30) app->plant_water--;
@@ -1309,23 +1561,24 @@ int32_t ssd1306_app_main(void* p) {
                     if(app->plant_stress < 10 && app->plant_water > 10 && app->plant_water < 90) {
                         app->plant_growth++;
                     } else if(app->plant_stress > 20 && app->plant_growth > 0) {
-                        app->plant_growth--; // shrinks/withers!
+                        app->plant_growth--;  // shrinks/withers!
                     }
 
-                    // change need randomly sometimes if taking too long
-                    if(app->plant_ticks % 100 == 0) {
-                        app->plant_need = rand() % 5;
+                    // Slow withering on neglect (very high stress or extreme conditions)
+                    if(app->plant_stress > 35 && app->plant_growth > 0) {
+                        if(app->plant_ticks % 10 == 0) app->plant_growth--;
                     }
 
                     // death mechanics
                     if(app->plant_water < -20 || app->plant_water > 120 ||
                        app->plant_stress > 40) {
                         app->plant_is_dead = true;
-                        app->plant_dead_until = furi_hal_rtc_get_timestamp() + (60 + (rand() % 241));
+                        app->plant_dead_until = now_epoch + (60 + (rand() % 241));
                         app->plant_lockout_attempts = 0;
                         app->plant_is_monty_insult = false;
                         app->plant_insult_idx = rand() % NUM_DEATH_INSULTS;
                         app->plant_growth = 0;
+                        app->plant_last_update_time = now_epoch;
                         save_plant_state(app);
                     }
                 }
