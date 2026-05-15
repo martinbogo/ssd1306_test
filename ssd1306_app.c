@@ -55,6 +55,12 @@ typedef struct {
     // plant
     uint32_t plant_growth;
     int32_t plant_water;
+    int32_t plant_sun;
+    int8_t plant_rotation;
+    uint32_t plant_last_press_tick;
+    uint8_t plant_stress;
+    uint8_t plant_need; // 0: water, 1: sun, 2: shade, 3: rotate L, 4: rotate R
+    uint32_t plant_ticks;
 
     bool running;
     FuriMutex* mutex;
@@ -403,48 +409,70 @@ static void render_plant_oled(App* app) {
     SSD1306* d = &app->oled;
     ssd1306_clear(d);
 
+    const char* hint = "I am a plant.";
+    if (app->plant_stress > 15) {
+        hint = "Stop button mashing.";
+    } else if (app->plant_stress > 5) {
+        hint = "Please don't rush me.";
+    } else if (app->plant_water <= 0) {
+        hint = "So parched...";
+    } else if (app->plant_water > 100) {
+        hint = "Drowning here.";
+    } else {
+        switch(app->plant_need) {
+            case 0: hint = "...dusty throat..."; break;
+            case 1: hint = "Squinting. Need light."; break;
+            case 2: hint = "Ouch, my retinas."; break;
+            case 3: hint = "Right side cold."; break;
+            case 4: hint = "Left side numb."; break;
+            default: hint = "..."; break;
+        }
+    }
+
+    // Draw hint text exclusively in the upper 16px (yellow bar zone)
+    if (app->yellow_bar_height > 0) {
+        ssd1306_fill_rect(d, 0, 0, 128, 16);
+        for(int16_t y = 4; y < 12; y++)
+            for(int16_t x = 0; x < 128; x++)
+                ssd1306_pixel(d, x, y, false);
+    }
+    ssd1306_string(d, 2, 4, hint);
+
     // ground
     ssd1306_line(d, 0, 60, 127, 60);
 
-    // pot
-    ssd1306_line(d, 54, 60, 50, 45);
-    ssd1306_line(d, 74, 60, 78, 45);
-    ssd1306_line(d, 50, 45, 78, 45);
+    // pot (rotates slightly)
+    int px = 64 + app->plant_rotation;
+    ssd1306_line(d, px-4, 60, px-8, 45);
+    ssd1306_line(d, px+4, 60, px+8, 45);
+    ssd1306_line(d, px-8, 45, px+8, 45);
 
-    uint32_t max_growth = 100;
-    uint32_t growth = app->plant_growth > max_growth ? max_growth : app->plant_growth;
-    int x_center = 64;
-    int y_base = 45;
-
-    // stalk logic
-    int height = (growth * 30) / max_growth;
-    if (height > 0) {
-        ssd1306_line(d, x_center, y_base, x_center, y_base - height);
-    }
-
-    // leaves (grow when taller)
-    if (height > 10) {
-        ssd1306_line(d, x_center, y_base - 10, x_center - 8, y_base - 15);
-        ssd1306_line(d, x_center, y_base - 15, x_center + 8, y_base - 20);
-    }
-
-    // text/status 
-    if (app->plant_water <= 0) {
-        ssd1306_string(d, 2, 10, "Water me. Obviously.");
-        // wilted leaves over stalk
-        ssd1306_line(d, x_center, y_base - height, x_center + 10, y_base - height + 10);
-    } else if (app->plant_water > 100) {
-        ssd1306_string(d, 2, 10, "Drowning. Thanks.");
-        // water level line above pot
-        ssd1306_line(d, 48, 40, 80, 40);
-        ssd1306_line(d, 48, 40, 48, 45);
-        ssd1306_line(d, 80, 40, 80, 45);
-    } else {
-        ssd1306_string(d, 2, 10, "Growing. Slowly.");
-        if (height > 0) {
-            // flower head
-            ssd1306_circle(d, x_center, y_base - height, 4);
-        }
+    // stalk logic: bounds y >= 17 to keep out of top area
+    uint32_t segments = app->plant_growth / 5;
+    if(segments > 200) segments = 200;
+    
+    int cx = px;
+    int cy = 45;
+    uint32_t seed = 0x12345678; // fixed seed, deterministic shape
+    
+    for(uint32_t i = 0; i < segments; i++) {
+        seed = seed * 1664525 + 1013904223;
+        int dx = (seed >> 24) % 9 - 4; // -4 to +4 sideways spread
+        int dy = (seed >> 20) % 4 + 1; // 1 to 4 upwards
+        
+        int nx = cx + dx;
+        int ny = cy - dy;
+        
+        // Bounds checking
+        if (nx < 0) nx = 0;
+        if (nx > 127) nx = 127;
+        if (ny < 17) ny = 17; // Don't enter upper 16px
+        
+        ssd1306_line(d, cx, cy, nx, ny);
+        cx = nx;
+        cy = ny;
+        
+        if (cy == 17) break; // reached top bounds
     }
 
     ssd1306_flush(d);
@@ -632,12 +660,41 @@ static void input_callback(InputEvent* event, void* ctx) {
 }
 
 static void handle_plant(App* app, InputEvent* ev) {
-    if(ev->type != InputTypePress && ev->type != InputTypeRepeat) return;
-    switch(ev->key) {
-    case InputKeyOk:
-        // water the plant
-        app->plant_water += 20;
+    if(ev->type != InputTypePress) return;
+
+    uint32_t now = furi_get_tick();
+    if (now - app->plant_last_press_tick < 1000) {
+        // Button mashing penalty!
+        app->plant_stress += 2;
+        app->plant_last_press_tick = now;
         render_plant_oled(app);
+        return;
+    }
+    app->plant_last_press_tick = now;
+    if (app->plant_stress > 0) app->plant_stress--;
+
+    switch(ev->key) {
+    case InputKeyOk: // water
+        if (app->plant_need == 0) { app->plant_water += 20; app->plant_need = rand() % 5; }
+        else { app->plant_water += 30; app->plant_stress += 5; }
+        break;
+    case InputKeyUp: // sun
+        if (app->plant_need == 1) { app->plant_sun += 20; app->plant_need = rand() % 5; }
+        else { app->plant_stress += 5; }
+        break;
+    case InputKeyDown: // shade
+        if (app->plant_need == 2) { app->plant_sun -= 20; app->plant_need = rand() % 5; }
+        else { app->plant_stress += 5; }
+        break;
+    case InputKeyLeft: // rotate L
+        app->plant_rotation -= 2;
+        if (app->plant_need == 3) { app->plant_need = rand() % 5; }
+        else { app->plant_stress += 2; }
+        break;
+    case InputKeyRight: // rotate R
+        app->plant_rotation += 2;
+        if (app->plant_need == 4) { app->plant_need = rand() % 5; }
+        else { app->plant_stress += 2; }
         break;
     case InputKeyBack:
         app->scene = SceneMainMenu;
@@ -646,6 +703,7 @@ static void handle_plant(App* app, InputEvent* ev) {
     default:
         break;
     }
+    render_plant_oled(app);
 }
 
 // -- Input handling --
@@ -925,11 +983,25 @@ int32_t ssd1306_app_main(void* p) {
         if(app->detected && app->scene == ScenePlant) {
             furi_mutex_acquire(app->mutex, FuriWaitForever);
             
-            // plant logic
-            if (app->plant_water > 0 && app->plant_water <= 100) {
-                app->plant_growth++;
+            app->plant_ticks++;
+            if (app->plant_ticks % 5 == 0) {
+                // slow adjustments
+                if (app->plant_water > 0) app->plant_water--;
+                if (app->plant_sun > 0) app->plant_sun--;
+                if (app->plant_stress > 0 && app->plant_ticks % 25 == 0) app->plant_stress--;
+
+                // grow if somewhat happy (not drowned, not completely parched, relatively low stress)
+                if (app->plant_stress < 10 && app->plant_water > 10 && app->plant_water < 90) {
+                    app->plant_growth++;
+                } else if (app->plant_stress > 20 && app->plant_growth > 0) {
+                    app->plant_growth--; // shrinks/withers!
+                }
+                
+                // change need randomly sometimes if taking too long
+                if (app->plant_ticks % 100 == 0) {
+                    app->plant_need = rand() % 5;
+                }
             }
-            app->plant_water--; // constantly drying or draining
             
             render_plant_oled(app);
             furi_mutex_release(app->mutex);
