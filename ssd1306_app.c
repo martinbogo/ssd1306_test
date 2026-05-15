@@ -17,6 +17,7 @@ typedef enum {
     SceneScrolling,
     SceneInfo,
     SceneClock,
+    ScenePlant,
 } Scene;
 
 typedef struct {
@@ -50,6 +51,10 @@ typedef struct {
 
     // clock
     uint8_t last_second;
+
+    // plant
+    uint32_t plant_growth;
+    int32_t plant_water;
 
     bool running;
     FuriMutex* mutex;
@@ -219,8 +224,9 @@ static const char* main_menu_items[] = {
     "Display Commands",
     "Scrolling",
     "Display Info",
+    "Botanical Obligation",
 };
-#define MAIN_MENU_COUNT 6
+#define MAIN_MENU_COUNT 7
 
 static const char* cmd_labels[] = {
     "Invert",
@@ -393,6 +399,57 @@ static void render_clock_oled(App* app) {
     app->last_second = dt.second;
 }
 
+static void render_plant_oled(App* app) {
+    SSD1306* d = &app->oled;
+    ssd1306_clear(d);
+
+    // ground
+    ssd1306_line(d, 0, 60, 127, 60);
+
+    // pot
+    ssd1306_line(d, 54, 60, 50, 45);
+    ssd1306_line(d, 74, 60, 78, 45);
+    ssd1306_line(d, 50, 45, 78, 45);
+
+    uint32_t max_growth = 100;
+    uint32_t growth = app->plant_growth > max_growth ? max_growth : app->plant_growth;
+    int x_center = 64;
+    int y_base = 45;
+
+    // stalk logic
+    int height = (growth * 30) / max_growth;
+    if (height > 0) {
+        ssd1306_line(d, x_center, y_base, x_center, y_base - height);
+    }
+
+    // leaves (grow when taller)
+    if (height > 10) {
+        ssd1306_line(d, x_center, y_base - 10, x_center - 8, y_base - 15);
+        ssd1306_line(d, x_center, y_base - 15, x_center + 8, y_base - 20);
+    }
+
+    // text/status 
+    if (app->plant_water <= 0) {
+        ssd1306_string(d, 2, 10, "Water me. Obviously.");
+        // wilted leaves over stalk
+        ssd1306_line(d, x_center, y_base - height, x_center + 10, y_base - height + 10);
+    } else if (app->plant_water > 100) {
+        ssd1306_string(d, 2, 10, "Drowning. Thanks.");
+        // water level line above pot
+        ssd1306_line(d, 48, 40, 80, 40);
+        ssd1306_line(d, 48, 40, 48, 45);
+        ssd1306_line(d, 80, 40, 80, 45);
+    } else {
+        ssd1306_string(d, 2, 10, "Growing. Slowly.");
+        if (height > 0) {
+            // flower head
+            ssd1306_circle(d, x_center, y_base - height, 4);
+        }
+    }
+
+    ssd1306_flush(d);
+}
+
 static void draw_callback(Canvas* canvas, void* ctx) {
     App* app = (App*)ctx;
     furi_mutex_acquire(app->mutex, FuriWaitForever);
@@ -548,11 +605,22 @@ static void draw_callback(Canvas* canvas, void* ctx) {
         char bat_str[20];
         snprintf(bat_str, sizeof(bat_str), "Battery: %d%%%s", bat,
             furi_hal_power_is_charging() ? " [CHG]" : "");
-        canvas_draw_str_aligned(canvas, 64, 54, AlignCenter, AlignCenter, bat_str);
+        canvas_draw_str_aligned(canvas, 64, 48, AlignCenter, AlignCenter, bat_str);
 
-        canvas_draw_str_aligned(canvas, 64, 64, AlignCenter, AlignCenter, "BACK to exit");
+        canvas_draw_str_aligned(canvas, 64, 58, AlignCenter, AlignCenter, "BACK to exit");
         break;
     }
+
+    case ScenePlant:
+        canvas_clear(canvas);
+        canvas_set_font(canvas, FontPrimary);
+        canvas_draw_str(canvas, 2, 12, "Desk Plant");
+        canvas_draw_line(canvas, 0, 15, 128, 15);
+        canvas_set_font(canvas, FontSecondary);
+        canvas_draw_str_aligned(canvas, 64, 28, AlignCenter, AlignCenter, "See OLED.");
+        canvas_draw_str_aligned(canvas, 64, 40, AlignCenter, AlignCenter, "Don't mess this up.");
+        canvas_draw_str_aligned(canvas, 64, 58, AlignCenter, AlignCenter, "BACK to exit menu");
+        break;
     }
 
     furi_mutex_release(app->mutex);
@@ -561,6 +629,23 @@ static void draw_callback(Canvas* canvas, void* ctx) {
 static void input_callback(InputEvent* event, void* ctx) {
     FuriMessageQueue* queue = (FuriMessageQueue*)ctx;
     furi_message_queue_put(queue, event, FuriWaitForever);
+}
+
+static void handle_plant(App* app, InputEvent* ev) {
+    if(ev->type != InputTypePress && ev->type != InputTypeRepeat) return;
+    switch(ev->key) {
+    case InputKeyOk:
+        // water the plant
+        app->plant_water += 20;
+        render_plant_oled(app);
+        break;
+    case InputKeyBack:
+        app->scene = SceneMainMenu;
+        app->cursor = 6;
+        break;
+    default:
+        break;
+    }
 }
 
 // -- Input handling --
@@ -585,6 +670,13 @@ static void handle_main_menu(App* app, InputEvent* ev) {
         case 3: app->scene = SceneCommands; app->cursor = 0; break;
         case 4: app->scene = SceneScrolling; app->cursor = 0; break;
         case 5: app->scene = SceneInfo; break;
+        case 6: 
+            app->scene = ScenePlant; 
+            if(app->plant_water == 0 && app->plant_growth == 0) {
+                app->plant_water = 50; // default start
+            }
+            render_plant_oled(app);
+            break;
         }
         break;
     case InputKeyBack:
@@ -809,6 +901,7 @@ int32_t ssd1306_app_main(void* p) {
                 case SceneScrolling: handle_scrolling(app, &ev); break;
                 case SceneInfo:     handle_info(app, &ev); break;
                 case SceneClock:    handle_clock(app, &ev); break;
+                case ScenePlant:    handle_plant(app, &ev); break;
                 }
             }
 
@@ -826,6 +919,20 @@ int32_t ssd1306_app_main(void* p) {
                 furi_mutex_release(app->mutex);
                 view_port_update(vp); // refresh Flipper screen too
             }
+        }
+
+        // periodic plant update
+        if(app->detected && app->scene == ScenePlant) {
+            furi_mutex_acquire(app->mutex, FuriWaitForever);
+            
+            // plant logic
+            if (app->plant_water > 0 && app->plant_water <= 100) {
+                app->plant_growth++;
+            }
+            app->plant_water--; // constantly drying or draining
+            
+            render_plant_oled(app);
+            furi_mutex_release(app->mutex);
         }
     }
 
