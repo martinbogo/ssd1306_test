@@ -1321,11 +1321,12 @@ int32_t ssd1306_app_main(void* p) {
                     if(app->plant_water < -20 || app->plant_water > 120 ||
                        app->plant_stress > 40) {
                         app->plant_is_dead = true;
-                        app->plant_dead_until = furi_get_tick() + (60 + (rand() % 241)) * 1000;
+                        app->plant_dead_until = furi_hal_rtc_get_timestamp() + (60 + (rand() % 241));
                         app->plant_lockout_attempts = 0;
                         app->plant_is_monty_insult = false;
                         app->plant_insult_idx = rand() % NUM_DEATH_INSULTS;
                         app->plant_growth = 0;
+                        save_plant_state(app);
                     }
                 }
             }
