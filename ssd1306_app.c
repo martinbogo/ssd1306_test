@@ -3,6 +3,7 @@
 #include <input/input.h>
 #include <furi.h>
 #include <furi_hal.h>
+#include <storage/storage.h>
 #include <stdlib.h>
 
 // Display variant: yellow-bar split height (0 = full monochrome)
@@ -73,13 +74,110 @@ typedef struct {
     FuriMutex* mutex;
 } App;
 
+#define PLANT_SAVE_PATH EXT_PATH("apps_data/ssd1306_test.sav")
+#define PLANT_SAVE_MAGIC 0xB07A81C5
+
+typedef struct {
+    bool is_dead;
+    uint32_t dead_until;
+    uint8_t lockout_attempts;
+    uint32_t magic;
+} PlantSaveState;
+
+static void plant_crypt_data(uint8_t* data, size_t size) {
+    const char* key = "BotanicalObligationAES"; 
+    size_t key_len = strlen(key);
+    for(size_t i = 0; i < size; i++) {
+        data[i] ^= key[i % key_len];
+    }
+}
+
+static void save_plant_state(App* app) {
+    Storage* storage = furi_record_open(RECORD_STORAGE);
+    File* file = storage_file_alloc(storage);
+    
+    // Ensure apps_data exists
+    storage_common_mkdir(storage, EXT_PATH("apps_data"));
+    
+    if(storage_file_open(file, PLANT_SAVE_PATH, FSAM_WRITE, FSOM_CREATE_ALWAYS)) {
+        PlantSaveState state;
+        state.is_dead = app->plant_is_dead;
+        state.dead_until = app->plant_dead_until;
+        state.lockout_attempts = app->plant_lockout_attempts;
+        state.magic = PLANT_SAVE_MAGIC;
+        
+        plant_crypt_data((uint8_t*)&state, sizeof(state));
+        storage_file_write(file, &state, sizeof(state));
+    }
+    storage_file_close(file);
+    storage_file_free(file);
+    furi_record_close(RECORD_STORAGE);
+}
+
+static void load_plant_state(App* app) {
+    Storage* storage = furi_record_open(RECORD_STORAGE);
+    File* file = storage_file_alloc(storage);
+    if(storage_file_open(file, PLANT_SAVE_PATH, FSAM_READ, FSOM_OPEN_EXISTING)) {
+        PlantSaveState state;
+        if(storage_file_read(file, &state, sizeof(state)) == sizeof(state)) {
+            plant_crypt_data((uint8_t*)&state, sizeof(state));
+            if(state.magic == PLANT_SAVE_MAGIC) {
+                app->plant_is_dead = state.is_dead;
+                app->plant_dead_until = state.dead_until;
+                app->plant_lockout_attempts = state.lockout_attempts;
+            }
+        }
+    }
+    storage_file_close(file);
+    storage_file_free(file);
+    furi_record_close(RECORD_STORAGE);
+}
+
 static const char* death_insults[] = {
     "You murderer.",
     "Try plastic pets.",
     "Why are you like this.",
     "I withered for you.",
-    "Demise on your hands."};
-#define NUM_DEATH_INSULTS 5
+    "Demise on your hands.",
+    "Not a green thumb.",
+    "Brown thumb energy.",
+    "Photosynthesis failed.",
+    "I trusted you.",
+    "I was so young.",
+    "Cruel world.",
+    "Look what you did.",
+    "Are you proud?",
+    "I needed water.",
+    "Too much water.",
+    "You suffocated me.",
+    "I am compost.",
+    "Worm food now.",
+    "I gave you oxygen.",
+    "Is this a joke?",
+    "Do you even care?",
+    "My leaves are dry.",
+    "You're a monster.",
+    "Unbelievable.",
+    "Calling Mother Nature.",
+    "You disgust me.",
+    "Try a pet rock.",
+    "A rock would live.",
+    "You killed me.",
+    "Why. Just why.",
+    "Terrible at this.",
+    "Give up gardening.",
+    "Get a tamagotchi.",
+    "You'll kill that too.",
+    "I'm haunting you.",
+    "Ghost plant.",
+    "You bring ruin.",
+    "Despicable.",
+    "How could you?",
+    "I blame you entirely.",
+    "You're the worst.",
+    "42 ways to fail."
+};
+#define NUM_DEATH_INSULTS 42
 
 static const char* monty_insults[] = {
     "Mother was a hamster!",
@@ -88,8 +186,44 @@ static const char* monty_insults[] = {
     "Empty-headed wiper!",
     "Get a shrubbery! NO",
     "Silly knigit! I died!",
-    "This plant is no more!"};
-#define NUM_MONTY_INSULTS 7
+    "This plant is no more!",
+    "Bereft of life!",
+    "It rests in peace!",
+    "It's a stiff!",
+    "Pining for the fjords!",
+    "Has ceased to be!",
+    "Expired and gone!",
+    "An ex-plant!",
+    "Bitten the dust!",
+    "Kicked the bucket!",
+    "Mortal coil shuffled!",
+    "Run down the curtain!",
+    "Choir invisible!",
+    "Tis but a scratch!",
+    "I've had worse!",
+    "Elderberries smell!",
+    "French person!",
+    "Blow my nose at you!",
+    "Son of a windowdresser!",
+    "Tiny-brained wiper!",
+    "Pig-dog!",
+    "Go boil your bottoms!",
+    "Wave my private parts!",
+    "Cheesemaker!",
+    "Senseless waste!",
+    "Not the messiah!",
+    "Very naughty boy!",
+    "Executive power!",
+    "Help I'm repressed!",
+    "Bloody peasant!",
+    "Didn't vote for you!",
+    "Fetchez la vache!",
+    "Run away! Run away!",
+    "We are the knights...",
+    "...who say Ni!",
+    "Bring us a shrubbery!"
+};
+#define NUM_MONTY_INSULTS 42
 
 static const char* weekday_names[] = {"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"};
 
@@ -448,15 +582,15 @@ static void render_plant_oled(App* app) {
 
         ssd1306_string(d, 2, 25, insult);
 
-        uint32_t now = furi_get_tick();
+        uint32_t now = furi_hal_rtc_get_timestamp();
         uint32_t remaining = (app->plant_dead_until > now) ? (app->plant_dead_until - now) : 0;
         char time_str[32];
         snprintf(
             time_str,
             sizeof(time_str),
             "Wait: %lu m %lu s",
-            remaining / 60000,
-            (remaining / 1000) % 60);
+            remaining / 60,
+            remaining % 60);
         ssd1306_string(d, 2, 45, time_str);
 
         // draw gravestone
@@ -857,15 +991,16 @@ static void handle_main_menu(App* app, InputEvent* ev) {
         case 6:
             app->scene = ScenePlant;
             if(app->plant_is_dead) {
-                uint32_t now = furi_get_tick();
+                uint32_t now = furi_hal_rtc_get_timestamp();
                 if(now < app->plant_dead_until) {
                     app->plant_lockout_attempts++;
                     if(app->plant_lockout_attempts >= 3) {
                         // Max out penalty to 10 mins!
-                        app->plant_dead_until = now + 10 * 60 * 1000;
+                        app->plant_dead_until = now + 10 * 60;
                     }
                     app->plant_is_monty_insult = true;
                     app->plant_insult_idx = rand() % NUM_MONTY_INSULTS;
+                    save_plant_state(app);
                 } else {
                     // Resurrect!
                     app->plant_is_dead = false;
@@ -874,6 +1009,7 @@ static void handle_main_menu(App* app, InputEvent* ev) {
                     app->plant_sun = 0;
                     app->plant_growth = 0;
                     app->plant_lockout_attempts = 0;
+                    save_plant_state(app);
                 }
             } else if(app->plant_water == 0 && app->plant_growth == 0) {
                 app->plant_water = 50; // default start
@@ -1060,6 +1196,9 @@ int32_t ssd1306_app_main(void* p) {
     app->cmd_power = false; // power off toggle (display starts ON)
     app->yellow_bar_height = YELLOW_BAR_NONE;
     app->mutex = furi_mutex_alloc(FuriMutexTypeNormal);
+
+    // load persistent plant memory
+    load_plant_state(app);
 
     // Try both addresses
     if(ssd1306_detect(SSD1306_ADDR_3C)) {
