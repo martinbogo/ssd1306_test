@@ -338,3 +338,68 @@ void ssd1306_string(SSD1306* d, int16_t x, int16_t y, const char* s) {
         s++;
     }
 }
+
+// 7-segment bitmasks: bits = gfedcba
+static const uint8_t seg7_map[10] = {
+    0x3F, // 0: abcdef
+    0x06, // 1: bc
+    0x5B, // 2: abdeg
+    0x4F, // 3: abcdg
+    0x66, // 4: bcfg
+    0x6D, // 5: acdfg
+    0x7D, // 6: acdefg
+    0x07, // 7: abc
+    0x7F, // 8: abcdefg
+    0x6F, // 9: abcdfg
+};
+
+// Segment positions within a 20x28 digit cell
+// Each segment: {x_offset, y_offset, width, height}
+static const int8_t seg_pos[7][4] = {
+    {3, 0, 14, 3},   // a: top horizontal
+    {17, 2, 3, 12},   // b: top-right vertical
+    {17, 15, 3, 12},  // c: bottom-right vertical
+    {3, 25, 14, 3},   // d: bottom horizontal
+    {0, 15, 3, 12},   // e: bottom-left vertical
+    {0, 2, 3, 12},    // f: top-left vertical
+    {3, 13, 14, 3},   // g: middle horizontal
+};
+
+void ssd1306_big_digit(SSD1306* d, int16_t x, int16_t y, uint8_t digit) {
+    if(digit > 9) return;
+    uint8_t segs = seg7_map[digit];
+    for(int s = 0; s < 7; s++) {
+        if(segs & (1 << s)) {
+            ssd1306_fill_rect(
+                d,
+                x + seg_pos[s][0],
+                y + seg_pos[s][1],
+                seg_pos[s][2],
+                seg_pos[s][3]);
+        }
+    }
+}
+
+void ssd1306_big_colon(SSD1306* d, int16_t x, int16_t y, bool on) {
+    if(!on) return;
+    ssd1306_fill_rect(d, x + 1, y + 7, 3, 3);
+    ssd1306_fill_rect(d, x + 1, y + 18, 3, 3);
+}
+
+void ssd1306_battery_icon(SSD1306* d, int16_t x, int16_t y, uint8_t pct, bool charging) {
+    // 16x9 battery outline with nub on right
+    ssd1306_rect(d, x, y + 1, 13, 7);       // body
+    ssd1306_fill_rect(d, x + 13, y + 3, 2, 3); // positive terminal nub
+    // fill level (up to 9px wide inside the body)
+    int fill = (pct * 9) / 100;
+    if(fill > 0) ssd1306_fill_rect(d, x + 2, y + 3, fill, 3);
+    // charging bolt indicator
+    if(charging) {
+        ssd1306_pixel(d, x + 7, y, true);
+        ssd1306_pixel(d, x + 6, y + 1, true);
+        ssd1306_pixel(d, x + 6, y + 2, true);
+        ssd1306_pixel(d, x + 8, y + 6, true);
+        ssd1306_pixel(d, x + 8, y + 7, true);
+        ssd1306_pixel(d, x + 9, y + 8, true);
+    }
+}

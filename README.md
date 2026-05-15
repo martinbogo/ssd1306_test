@@ -4,6 +4,13 @@ A Flipper Zero application for testing and diagnosing external SSD1306-based 128
 
 ## Features
 
+**Clock + Status Board**
+- Large 7-segment style clock (HH:MM) with blinking colon and seconds display
+- Status bar with battery level, charging indicator, day of week, and date
+- Yellow-bar aware layout: on dual-color displays, the status bar renders as dark text on a filled yellow background; on mono displays, a clean line-separated header
+- Shows Flipper device name at the bottom
+- Updates every second automatically
+
 **Test Patterns**
 - All White / All Black (dead pixel detection)
 - Checkerboard, Horizontal Lines, Vertical Lines

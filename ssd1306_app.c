@@ -16,6 +16,7 @@ typedef enum {
     SceneCommands,
     SceneScrolling,
     SceneInfo,
+    SceneClock,
 } Scene;
 
 typedef struct {
@@ -47,9 +48,14 @@ typedef struct {
     uint8_t yellow_bar_height; // 0 or 16
     uint8_t detected_addr;     // 0x3C or 0x3D
 
+    // clock
+    uint8_t last_second;
+
     bool running;
     FuriMutex* mutex;
 } App;
+
+static const char* weekday_names[] = {"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"};
 
 // -- Pattern generators --
 
@@ -207,13 +213,14 @@ static PatternFunc pattern_funcs[] = {
 // -- Flipper screen rendering (draw callback) --
 
 static const char* main_menu_items[] = {
+    "Clock + Status",
     "Test Patterns",
     "Brightness",
     "Display Commands",
     "Scrolling",
     "Display Info",
 };
-#define MAIN_MENU_COUNT 5
+#define MAIN_MENU_COUNT 6
 
 static const char* cmd_labels[] = {
     "Invert",
@@ -254,6 +261,136 @@ static void draw_menu(Canvas* canvas, const char** items, int count, int cursor,
         canvas_draw_str(canvas, 6, y, items[idx]);
         canvas_set_color(canvas, ColorBlack);
     }
+}
+
+static void render_clock_oled(App* app) {
+    SSD1306* d = &app->oled;
+    DateTime dt;
+    furi_hal_rtc_get_datetime(&dt);
+
+    uint8_t bat_pct = furi_hal_power_get_pct();
+    bool charging = furi_hal_power_is_charging();
+
+    ssd1306_clear(d);
+
+    if(app->yellow_bar_height > 0) {
+        // Yellow bar: filled background with inverted (dark) text/icons
+        ssd1306_fill_rect(d, 0, 0, 128, 16);
+
+        // battery icon (inverted: clear pixels in filled area)
+        // draw outline by clearing, then re-adding body
+        for(int16_t y = 3; y < 12; y++)
+            for(int16_t x = 2; x < 18; x++)
+                ssd1306_pixel(d, x, y, false);
+        // re-draw battery outline in cleared area (dark lines on yellow)
+        ssd1306_pixel(d, 2, 4, true); ssd1306_pixel(d, 2, 10, true);
+        ssd1306_pixel(d, 14, 4, true); ssd1306_pixel(d, 14, 10, true);
+        for(int16_t x = 3; x < 14; x++) {
+            ssd1306_pixel(d, x, 3, true);
+            ssd1306_pixel(d, x, 11, true);
+        }
+        for(int16_t y = 4; y < 11; y++) {
+            ssd1306_pixel(d, 2, y, true);
+            ssd1306_pixel(d, 14, y, true);
+        }
+        ssd1306_pixel(d, 15, 6, true);
+        ssd1306_pixel(d, 15, 7, true);
+        ssd1306_pixel(d, 15, 8, true);
+        int fill = (bat_pct * 10) / 100;
+        if(fill > 0)
+            for(int16_t y = 5; y < 10; y++)
+                for(int16_t x = 4; x < 4 + fill; x++)
+                    ssd1306_pixel(d, x, y, true);
+
+        // battery percentage text (dark on yellow = clear pixels for text bg)
+        char pct_str[6];
+        snprintf(pct_str, sizeof(pct_str), "%d%%", bat_pct);
+        // clear area for text, then draw dark chars
+        for(int16_t y = 4; y < 12; y++)
+            for(int16_t x = 18; x < 42; x++)
+                ssd1306_pixel(d, x, y, false);
+        ssd1306_string(d, 19, 4, pct_str);
+        // invert the text chars (make them dark-on-yellow)
+        // Actually: text was drawn as lit pixels in a cleared area,
+        // so on yellow bar they appear as light text on dark cutout. Perfect.
+
+        if(charging) {
+            for(int16_t y = 4; y < 12; y++)
+                for(int16_t x = 40; x < 48; x++)
+                    ssd1306_pixel(d, x, y, false);
+            ssd1306_char(d, 41, 4, '+');
+        }
+
+        // day of week (centered)
+        const char* dow = (dt.weekday >= 1 && dt.weekday <= 7)
+            ? weekday_names[dt.weekday - 1] : "???";
+        int16_t dow_x = 55;
+        for(int16_t y = 4; y < 12; y++)
+            for(int16_t x = dow_x - 2; x < dow_x + 20; x++)
+                ssd1306_pixel(d, x, y, false);
+        ssd1306_string(d, dow_x, 4, dow);
+
+        // date (right side)
+        char date_str[12];
+        snprintf(date_str, sizeof(date_str), "%02d/%02d/%02d",
+            dt.month, dt.day, dt.year % 100);
+        int16_t date_x = 80;
+        for(int16_t y = 4; y < 12; y++)
+            for(int16_t x = date_x - 2; x < 128; x++)
+                ssd1306_pixel(d, x, y, false);
+        ssd1306_string(d, date_x, 4, date_str);
+
+    } else {
+        // Mono display: thin status line at top with no fill
+        ssd1306_battery_icon(d, 2, 2, bat_pct, charging);
+
+        char pct_str[6];
+        snprintf(pct_str, sizeof(pct_str), "%d%%", bat_pct);
+        ssd1306_string(d, 20, 4, pct_str);
+
+        const char* dow = (dt.weekday >= 1 && dt.weekday <= 7)
+            ? weekday_names[dt.weekday - 1] : "???";
+        ssd1306_string(d, 50, 4, dow);
+
+        char date_str[12];
+        snprintf(date_str, sizeof(date_str), "%02d/%02d/%02d",
+            dt.month, dt.day, dt.year % 100);
+        ssd1306_string(d, 80, 4, date_str);
+
+        ssd1306_line(d, 0, 13, 127, 13);
+    }
+
+    // Big clock: HH:MM in the main area
+    // Digit cell: 20w x 28h, colon: 6w, gaps: 2px between elements
+    // Total: 20+2+20+2+6+2+20+2+20 = 94px. Centered: x = (128-94)/2 = 17
+    int16_t cx = 17;
+    int16_t cy = 18; // below status bar
+
+    uint8_t h10 = dt.hour / 10;
+    uint8_t h1 = dt.hour % 10;
+    uint8_t m10 = dt.minute / 10;
+    uint8_t m1 = dt.minute % 10;
+
+    ssd1306_big_digit(d, cx, cy, h10);
+    ssd1306_big_digit(d, cx + 22, cy, h1);
+    ssd1306_big_colon(d, cx + 43, cy, (dt.second & 1) == 0); // blink every second
+    ssd1306_big_digit(d, cx + 50, cy, m10);
+    ssd1306_big_digit(d, cx + 72, cy, m1);
+
+    // Seconds in small font, bottom right of the clock
+    char sec_str[8];
+    snprintf(sec_str, sizeof(sec_str), ":%02d", dt.second);
+    ssd1306_string(d, cx + 93, cy + 20, sec_str);
+
+    // Device name at the bottom
+    const char* name = furi_hal_version_get_name_ptr();
+    if(name) {
+        int16_t name_x = 64 - (int16_t)((strlen(name) * 6) / 2);
+        ssd1306_string(d, name_x, 56, name);
+    }
+
+    ssd1306_flush(d);
+    app->last_second = dt.second;
 }
 
 static void draw_callback(Canvas* canvas, void* ctx) {
@@ -389,6 +526,33 @@ static void draw_callback(Canvas* canvas, void* ctx) {
         canvas_draw_str(canvas, 6, 64, line);
         break;
     }
+
+    case SceneClock: {
+        canvas_clear(canvas);
+        canvas_set_font(canvas, FontPrimary);
+        canvas_draw_str(canvas, 2, 12, "Clock + Status");
+        canvas_draw_line(canvas, 0, 15, 128, 15);
+        canvas_set_font(canvas, FontSecondary);
+
+        DateTime dt;
+        furi_hal_rtc_get_datetime(&dt);
+        char time_str[12];
+        snprintf(time_str, sizeof(time_str), "%02d:%02d:%02d", dt.hour, dt.minute, dt.second);
+        canvas_draw_str_aligned(canvas, 64, 30, AlignCenter, AlignCenter, time_str);
+
+        char date_str[16];
+        snprintf(date_str, sizeof(date_str), "%04d-%02d-%02d", dt.year, dt.month, dt.day);
+        canvas_draw_str_aligned(canvas, 64, 42, AlignCenter, AlignCenter, date_str);
+
+        uint8_t bat = furi_hal_power_get_pct();
+        char bat_str[20];
+        snprintf(bat_str, sizeof(bat_str), "Battery: %d%%%s", bat,
+            furi_hal_power_is_charging() ? " [CHG]" : "");
+        canvas_draw_str_aligned(canvas, 64, 54, AlignCenter, AlignCenter, bat_str);
+
+        canvas_draw_str_aligned(canvas, 64, 64, AlignCenter, AlignCenter, "BACK to exit");
+        break;
+    }
     }
 
     furi_mutex_release(app->mutex);
@@ -412,11 +576,15 @@ static void handle_main_menu(App* app, InputEvent* ev) {
         break;
     case InputKeyOk:
         switch(app->cursor) {
-        case 0: app->scene = ScenePatterns; app->cursor = 0; break;
-        case 1: app->scene = SceneBrightness; break;
-        case 2: app->scene = SceneCommands; app->cursor = 0; break;
-        case 3: app->scene = SceneScrolling; app->cursor = 0; break;
-        case 4: app->scene = SceneInfo; break;
+        case 0:
+            app->scene = SceneClock;
+            render_clock_oled(app);
+            break;
+        case 1: app->scene = ScenePatterns; app->cursor = 0; break;
+        case 2: app->scene = SceneBrightness; break;
+        case 3: app->scene = SceneCommands; app->cursor = 0; break;
+        case 4: app->scene = SceneScrolling; app->cursor = 0; break;
+        case 5: app->scene = SceneInfo; break;
         }
         break;
     case InputKeyBack:
@@ -443,7 +611,7 @@ static void handle_patterns(App* app, InputEvent* ev) {
         break;
     case InputKeyBack:
         app->scene = SceneMainMenu;
-        app->cursor = 0;
+        app->cursor = 1;
         break;
     default:
         break;
@@ -465,7 +633,7 @@ static void handle_brightness(App* app, InputEvent* ev) {
         break;
     case InputKeyBack:
         app->scene = SceneMainMenu;
-        app->cursor = 1;
+        app->cursor = 2;
         break;
     default:
         break;
@@ -511,7 +679,7 @@ static void handle_commands(App* app, InputEvent* ev) {
         break;
     case InputKeyBack:
         app->scene = SceneMainMenu;
-        app->cursor = 2;
+        app->cursor = 3;
         break;
     default:
         break;
@@ -548,7 +716,7 @@ static void handle_scrolling(App* app, InputEvent* ev) {
     case InputKeyBack:
         ssd1306_scroll_stop(&app->oled);
         app->scene = SceneMainMenu;
-        app->cursor = 3;
+        app->cursor = 4;
         break;
     default:
         break;
@@ -559,7 +727,15 @@ static void handle_info(App* app, InputEvent* ev) {
     if(ev->type != InputTypePress) return;
     if(ev->key == InputKeyBack) {
         app->scene = SceneMainMenu;
-        app->cursor = 4;
+        app->cursor = 5;
+    }
+}
+
+static void handle_clock(App* app, InputEvent* ev) {
+    if(ev->type != InputTypePress) return;
+    if(ev->key == InputKeyBack) {
+        app->scene = SceneMainMenu;
+        app->cursor = 0;
     }
 }
 
@@ -632,11 +808,24 @@ int32_t ssd1306_app_main(void* p) {
                 case SceneCommands: handle_commands(app, &ev); break;
                 case SceneScrolling: handle_scrolling(app, &ev); break;
                 case SceneInfo:     handle_info(app, &ev); break;
+                case SceneClock:    handle_clock(app, &ev); break;
                 }
             }
 
             furi_mutex_release(app->mutex);
             view_port_update(vp);
+        }
+
+        // periodic clock update (on message queue timeout, ~5 times/sec)
+        if(app->detected && app->scene == SceneClock) {
+            DateTime dt;
+            furi_hal_rtc_get_datetime(&dt);
+            if(dt.second != app->last_second) {
+                furi_mutex_acquire(app->mutex, FuriWaitForever);
+                render_clock_oled(app);
+                furi_mutex_release(app->mutex);
+                view_port_update(vp); // refresh Flipper screen too
+            }
         }
     }
 

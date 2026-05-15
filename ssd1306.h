@@ -57,3 +57,8 @@ void ssd1306_fill_rect(SSD1306* d, int16_t x, int16_t y, int16_t w, int16_t h);
 void ssd1306_circle(SSD1306* d, int16_t cx, int16_t cy, int16_t r);
 void ssd1306_char(SSD1306* d, int16_t x, int16_t y, char c);
 void ssd1306_string(SSD1306* d, int16_t x, int16_t y, const char* s);
+
+// Large 7-segment style digits (20w x 28h pixels each)
+void ssd1306_big_digit(SSD1306* d, int16_t x, int16_t y, uint8_t digit);
+void ssd1306_big_colon(SSD1306* d, int16_t x, int16_t y, bool on);
+void ssd1306_battery_icon(SSD1306* d, int16_t x, int16_t y, uint8_t pct, bool charging);
