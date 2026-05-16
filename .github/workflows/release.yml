@@ -11,12 +11,15 @@ jobs:
     runs-on: ubuntu-latest
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     permissions:
       contents: write
 
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # full history needed for git log between tags
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -33,14 +36,126 @@ jobs:
         run: ufbt
 
       - name: Rename FAP to include tag
-        run: |
-          TAG=${{ github.ref_name }}
-          cp dist/ssd1306_test.fap dist/ssd1306_test_${TAG}.fap
+        run: cp dist/ssd1306_test.fap dist/ssd1306_test_${{ github.ref_name }}.fap
 
-      - name: Create GitHub Release
+      - name: Generate release notes
+        id: notes
+        run: |
+          TAG="${{ github.ref_name }}"
+
+          # Find the most recent published full (non-pre-release, non-draft) release
+          # excluding the current tag in case it was somehow already created
+          PREV_TAG=$(gh release list \
+            --exclude-pre-releases \
+            --exclude-drafts \
+            --limit 10 \
+            --json tagName \
+            --jq '.[].tagName' \
+            | grep -v "^${TAG}$" \
+            | head -1 || true)
+
+          if [ -z "$PREV_TAG" ]; then
+            # ---------------------------------------------------------------
+            # First full release: write a summary of the project from scratch
+            # ---------------------------------------------------------------
+            cat > release_notes.md << 'EOF'
+          ## SSD1306 Test — Initial Release
+
+          A diagnostic and creative tool for external SSD1306-based 128x64 I2C OLED
+          displays connected to the Flipper Zero GPIO header. Supports both monochrome
+          and yellow-bar (dual-color) display variants. Built for Momentum firmware.
+
+          ### Features included in this release
+
+          **Clock + Status Board**
+          - Large 7-segment style HH:MM clock with blinking colon and seconds
+          - Status bar showing battery level, charging indicator, day of week, and date
+          - Yellow-bar aware: renders filled status bar in the yellow zone on dual-color displays
+          - Shows Flipper device name at the bottom; updates every second automatically
+
+          **Spiteful Ficus — Passive-Aggressive Desk Plant**
+          - A Tamagotchi-style plant that needs watering, sunlight, shade, and rotation
+          - Real-time decay: the plant continues to age while the app is closed
+          - 80 passive-aggressive need messages and death insults (including 42 Monty Python quotes)
+          - Plant death and resurrection mechanics with escalating lockout and insults
+          - Save/load state persisted to SD card with XOR obfuscation
+
+          **Test Patterns**
+          - All White / All Black, Checkerboard, Horizontal Lines, Vertical Lines
+          - Border, Color Zone Test (yellow/blue boundary), Page Fill, Dithered Gradient
+          - Shapes and Text rendering demo
+
+          **Brightness Control**
+          - Contrast adjustable from 0–255 with real-time preview bar
+
+          **Display Commands**
+          - Invert, Flip Horizontal, Flip Vertical, Force All Pixels, Display Power
+          - Variant toggle: monochrome vs yellow-bar
+
+          **Hardware Scrolling**
+          - Horizontal and diagonal scroll with 8 adjustable speed levels
+
+          **Display Info**
+          - Auto-detects I2C address (0x3C and 0x3D), live connection status
+
+          ### Wiring
+          | OLED | Flipper GPIO |
+          |------|-------------|
+          | GND  | Pin 18 (GND) |
+          | VCC  | Pin 9 (3.3V) |
+          | SCL  | Pin 16 (C0)  |
+          | SDA  | Pin 15 (C1)  |
+          EOF
+
+          else
+            # ---------------------------------------------------------------
+            # Subsequent release: summarise commits since last full release
+            # ---------------------------------------------------------------
+            COMMITS=$(git log --pretty=format:"%s" "${PREV_TAG}..${TAG}")
+
+            ADDED=$(echo "$COMMITS"  | grep -iE "^(add|feat|new|implement|create)" | sed 's/^/- /' || true)
+            CHANGED=$(echo "$COMMITS" | grep -iE "^(update|change|refactor|improve|rename|expand|randomize|rewrite|rework)" | sed 's/^/- /' || true)
+            FIXED=$(echo "$COMMITS"  | grep -iE "^(fix|repair|resolve|correct|patch)" | sed 's/^/- /' || true)
+            REMOVED=$(echo "$COMMITS" | grep -iE "^(remove|delete|drop|revert)" | sed 's/^/- /' || true)
+            OTHER=$(echo "$COMMITS"  | grep -viE "^(add|feat|new|implement|create|update|change|refactor|improve|rename|expand|randomize|rewrite|rework|fix|repair|resolve|correct|patch|remove|delete|drop|revert)" | sed 's/^/- /' || true)
+
+            {
+              echo "## What's changed since ${PREV_TAG}"
+              echo ""
+              if [ -n "$ADDED" ]; then
+                echo "### Added"
+                echo "$ADDED"
+                echo ""
+              fi
+              if [ -n "$CHANGED" ]; then
+                echo "### Changed"
+                echo "$CHANGED"
+                echo ""
+              fi
+              if [ -n "$FIXED" ]; then
+                echo "### Fixed"
+                echo "$FIXED"
+                echo ""
+              fi
+              if [ -n "$REMOVED" ]; then
+                echo "### Removed"
+                echo "$REMOVED"
+                echo ""
+              fi
+              if [ -n "$OTHER" ]; then
+                echo "### Other"
+                echo "$OTHER"
+                echo ""
+              fi
+              echo "**Full changelog:** [\`${PREV_TAG}...${TAG}\`](https://github.com/${{ github.repository }}/compare/${PREV_TAG}...${TAG})"
+            } > release_notes.md
+          fi
+
+      - name: Create draft release
         uses: softprops/action-gh-release@v2
         with:
           name: ${{ github.ref_name }}
+          body_path: release_notes.md
           files: dist/ssd1306_test_${{ github.ref_name }}.fap
-          generate_release_notes: true
+          draft: true
           fail_on_unmatched_files: true
