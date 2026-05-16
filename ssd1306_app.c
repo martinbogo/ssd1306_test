@@ -899,11 +899,6 @@ static void render_plant_oled(App* app) {
         cy = ny;
     }
 
-    // Status indicators at bottom right
-    char status[32];
-    snprintf(status, sizeof(status), "W:%ld S:%ld St:%d", app->plant_water, app->plant_sun, app->plant_stress);
-    ssd1306_string(d, 2, 50, status);
-
     ssd1306_flush(d);
 }
 
