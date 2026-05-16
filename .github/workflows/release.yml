@@ -109,13 +109,6 @@ jobs:
           - Yellow-bar aware: renders filled status bar in the yellow zone on dual-color displays
           - Shows Flipper device name at the bottom; updates every second automatically
 
-          **Spiteful Ficus — Passive-Aggressive Desk Plant**
-          - A Tamagotchi-style plant that needs watering, sunlight, shade, and rotation
-          - Real-time decay: the plant continues to age while the app is closed
-          - 80 passive-aggressive need messages and death insults (including 42 Monty Python quotes)
-          - Plant death and resurrection mechanics with escalating lockout and insults
-          - Save/load state persisted to SD card with XOR obfuscation
-
           **Test Patterns**
           - All White / All Black, Checkerboard, Horizontal Lines, Vertical Lines
           - Border, Color Zone Test (yellow/blue boundary), Page Fill, Dithered Gradient
