@@ -47,6 +47,9 @@ void ssd1306_scroll_h(SSD1306* d, bool left, uint8_t start_page, uint8_t end_pag
 void ssd1306_scroll_hv(SSD1306* d, bool left, uint8_t start_page, uint8_t end_page, uint8_t speed, uint8_t v_offset);
 void ssd1306_scroll_stop(SSD1306* d);
 
+// Fade / Blink
+void ssd1306_set_fade_blink(SSD1306* d, uint8_t mode);
+
 // Drawing primitives
 void ssd1306_clear(SSD1306* d);
 void ssd1306_fill(SSD1306* d, uint8_t pattern);
